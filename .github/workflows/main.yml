@@ -29,7 +29,12 @@ jobs:
       with:
         python-version: '3.8'
         architecture: 'x64'
-
+    
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.10' 
+    - run: python my_script.py
     # Cache dependencies. From:
     # https://github.com/actions/cache/blob/master/examples.md#python---pip
     - uses: actions/cache@v3
