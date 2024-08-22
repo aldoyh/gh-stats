@@ -9,7 +9,7 @@ on:
   schedule:
     - cron: "42 0 * * *"
   workflow_dispatch:
-  
+
 # A workflow run is made up of one or more jobs that can run sequentially or in
 # parallel
 jobs:
@@ -24,16 +24,16 @@ jobs:
     - uses: actions/checkout@v3
 
     # Run using Python 3.8 for consistency and aiohttp
-    - name: Set up Python 3.8
-      uses: actions/setup-python@v2
-      with:
-        python-version: '3.8'
-        architecture: 'x64'
-    
+    # - name: Set up Python 3.8
+    #   uses: actions/setup-python@v2
+    #   with:
+    #     python-version: '3.8'
+    #     architecture: 'x64'
+
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
       with:
-        python-version: '3.10' 
+        python-version: '3.10'
     - run: python github_status.py
     # Cache dependencies. From:
     # https://github.com/actions/cache/blob/master/examples.md#python---pip
@@ -43,8 +43,8 @@ jobs:
         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
-    
-        
+
+
     # Install dependencies with `pip`
     - name: Install requirements
       run: |
@@ -59,7 +59,7 @@ jobs:
       env:
         ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        EXCLUDED: ${{ secrets.EXCLUDED }}
+        EXCLUDED: ${{ secrets.EXCLUDED || '' }}
         EXCLUDED_LANGS: ${{ secrets.EXCLUDED_LANGS }}
         COUNT_STATS_FROM_FORKS: ${{ secrets.COUNT_STATS_FROM_FORKS }}
 
