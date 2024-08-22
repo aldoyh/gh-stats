@@ -35,6 +35,7 @@ jobs:
       with:
         python-version: '3.10'
     - run: python github_status.py
+      working-directory: ./
     # Cache dependencies. From:
     # https://github.com/actions/cache/blob/master/examples.md#python---pip
     - uses: actions/cache@v3
