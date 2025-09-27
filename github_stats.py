@@ -40,15 +40,56 @@ class Queries(object):
                 r = await self.session.post("https://api.github.com/graphql",
                                             headers=headers,
                                             json={"query": generated_query})
-            return await r.json()
-        except:
-            print("aiohttp failed for GraphQL query")
+                
+                # Check for HTTP errors
+                if r.status == 401:
+                    raise Exception("Authentication failed. Please check your ACCESS_TOKEN.")
+                elif r.status == 403:
+                    raise Exception("API rate limit exceeded or insufficient permissions.")
+                elif r.status >= 400:
+                    error_text = await r.text()
+                    raise Exception(f"GitHub API error {r.status}: {error_text}")
+                
+                result = await r.json()
+                
+                # Check for GraphQL errors
+                if "errors" in result:
+                    error_msg = "; ".join([error.get("message", "Unknown error") for error in result["errors"]])
+                    raise Exception(f"GraphQL errors: {error_msg}")
+                
+                return result
+                
+        except Exception as e:
+            if "Authentication failed" in str(e) or "rate limit" in str(e) or "GraphQL errors" in str(e):
+                raise e
+            
+            print(f"aiohttp failed for GraphQL query: {e}")
             # Fall back on non-async requests
-            async with self.semaphore:
-                r = requests.post("https://api.github.com/graphql",
-                                  headers=headers,
-                                  json={"query": generated_query})
-                return r.json()
+            try:
+                async with self.semaphore:
+                    r = requests.post("https://api.github.com/graphql",
+                                      headers=headers,
+                                      json={"query": generated_query})
+                    
+                    # Check for HTTP errors
+                    if r.status_code == 401:
+                        raise Exception("Authentication failed. Please check your ACCESS_TOKEN.")
+                    elif r.status_code == 403:
+                        raise Exception("API rate limit exceeded or insufficient permissions.")
+                    elif r.status_code >= 400:
+                        raise Exception(f"GitHub API error {r.status_code}: {r.text}")
+                    
+                    result = r.json()
+                    
+                    # Check for GraphQL errors
+                    if "errors" in result:
+                        error_msg = "; ".join([error.get("message", "Unknown error") for error in result["errors"]])
+                        raise Exception(f"GraphQL errors: {error_msg}")
+                    
+                    return result
+            except Exception as fallback_error:
+                print(f"Fallback request also failed: {fallback_error}")
+                raise fallback_error
 
     async def query_rest(self, path: str, params: Optional[Dict] = None) -> Dict:
         """
@@ -58,7 +99,7 @@ class Queries(object):
         :return: deserialized REST JSON output
         """
 
-        for _ in range(60):
+        for attempt in range(60):
             headers = {
                 "Authorization": f"token {self.access_token}",
             }
@@ -71,30 +112,71 @@ class Queries(object):
                     r = await self.session.get(f"https://api.github.com/{path}",
                                                headers=headers,
                                                params=tuple(params.items()))
+                
+                # Handle specific status codes
                 if r.status == 202:
-                    # print(f"{path} returned 202. Retrying...")
-                    print(f"A path returned 202. Retrying...")
+                    print(f"A path returned 202. Retrying... (attempt {attempt + 1}/60)")
                     await asyncio.sleep(2)
                     continue
-
-                result = await r.json()
-                if result is not None:
-                    return result
-            except:
-                print("aiohttp failed for rest query")
-                # Fall back on non-async requests
-                async with self.semaphore:
-                    r = requests.get(f"https://api.github.com/{path}",
-                                     headers=headers,
-                                     params=tuple(params.items()))
-                    if r.status_code == 202:
-                        print(f"A path returned 202. Retrying...")
-                        await asyncio.sleep(2)
+                elif r.status == 401:
+                    raise Exception("Authentication failed. Please check your ACCESS_TOKEN.")
+                elif r.status == 403:
+                    # Check if it's rate limiting
+                    if "rate limit" in (await r.text()).lower():
+                        print(f"Rate limited. Retrying... (attempt {attempt + 1}/60)")
+                        await asyncio.sleep(60)  # Wait longer for rate limit
                         continue
-                    elif r.status_code == 200:
-                        return r.json()
-        # print(f"There were too many 202s. Data for {path} will be incomplete.")
-        print("There were too many 202s. Data for this repository will be incomplete.")
+                    else:
+                        raise Exception("API access forbidden. Check permissions.")
+                elif r.status == 404:
+                    print(f"Path {path} not found, returning empty result")
+                    return dict()
+                elif r.status >= 400:
+                    error_text = await r.text()
+                    raise Exception(f"GitHub API error {r.status}: {error_text}")
+                elif r.status == 200:
+                    result = await r.json()
+                    if result is not None:
+                        return result
+
+            except Exception as e:
+                if "Authentication failed" in str(e) or "API access forbidden" in str(e):
+                    raise e
+                
+                print(f"aiohttp failed for rest query (attempt {attempt + 1}): {e}")
+                # Fall back on non-async requests
+                try:
+                    async with self.semaphore:
+                        r = requests.get(f"https://api.github.com/{path}",
+                                         headers=headers,
+                                         params=tuple(params.items()))
+                        
+                        if r.status_code == 202:
+                            print(f"A path returned 202. Retrying... (attempt {attempt + 1}/60)")
+                            await asyncio.sleep(2)
+                            continue
+                        elif r.status_code == 401:
+                            raise Exception("Authentication failed. Please check your ACCESS_TOKEN.")
+                        elif r.status_code == 403:
+                            if "rate limit" in r.text.lower():
+                                print(f"Rate limited. Retrying... (attempt {attempt + 1}/60)")
+                                await asyncio.sleep(60)
+                                continue
+                            else:
+                                raise Exception("API access forbidden. Check permissions.")
+                        elif r.status_code == 404:
+                            print(f"Path {path} not found, returning empty result")
+                            return dict()
+                        elif r.status_code >= 400:
+                            raise Exception(f"GitHub API error {r.status_code}: {r.text}")
+                        elif r.status_code == 200:
+                            return r.json()
+                except Exception as fallback_error:
+                    if "Authentication failed" in str(fallback_error) or "API access forbidden" in str(fallback_error):
+                        raise fallback_error
+                    print(f"Fallback request also failed: {fallback_error}")
+                    
+        print("There were too many retries. Data for this repository will be incomplete.")
         return dict()
 
     @staticmethod
