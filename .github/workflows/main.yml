@@ -4,14 +4,18 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 0 * * *"  # Run daily at midnight UTC
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -19,7 +23,8 @@ jobs:
           python-version: '3.12'
           architecture: 'x64'
 
-      - uses: actions/cache@v4
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -31,27 +36,69 @@ jobs:
           python3 -m pip install --upgrade pip setuptools wheel
           python3 -m pip install -r requirements.txt
 
+      - name: Validate environment variables
+        run: |
+          echo "Validating required environment variables..."
+          if [ -z "${{ secrets.ACCESS_TOKEN }}" ]; then
+            echo "ERROR: ACCESS_TOKEN secret is not set!"
+            echo "Please set ACCESS_TOKEN in your repository secrets with a GitHub personal access token."
+            exit 1
+          fi
+          echo "ACCESS_TOKEN is set ✓"
+          echo "GITHUB_ACTOR: ${{ github.actor }}"
+
       - name: Generate images
         run: |
+          echo "Starting image generation..."
           python3 --version
           python3 generate_images.py
         env:
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
           EXCLUDED: ${{ secrets.EXCLUDED }}
           EXCLUDED_LANGS: ${{ secrets.EXCLUDED_LANGS }}
           COUNT_STATS_FROM_FORKS: ${{ secrets.COUNT_STATS_FROM_FORKS }}
 
-      - name: Commit and push generated images to main branch
+      - name: Verify generated files
         run: |
-          git config --global user.name "github-stats[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "Checking generated files..."
+          if [ -f "generated/overview.svg" ]; then
+            echo "✓ overview.svg generated ($(wc -l < generated/overview.svg) lines)"
+          else
+            echo "✗ overview.svg not generated"
+            exit 1
+          fi
+          if [ -f "generated/languages.svg" ]; then
+            echo "✓ languages.svg generated ($(wc -l < generated/languages.svg) lines)"
+          else
+            echo "✗ languages.svg not generated"
+            exit 1
+          fi
+
+      - name: Commit and push generated images
+        run: |
+          git config --local user.name "github-stats[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # Add generated files
           git add generated/
+          
+          # Check if there are changes to commit
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update generated stats images [skip ci]"
-            git push origin main
+            echo "Committing changes..."
+            git commit -m "Update generated stats images [skip ci]" || {
+              echo "Commit failed, but continuing..."
+            }
+            
+            echo "Pushing changes..."
+            git push origin ${{ github.ref_name }} || {
+              echo "Push failed. This might be due to concurrent updates."
+              exit 1
+            }
+            echo "Changes pushed successfully!"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
