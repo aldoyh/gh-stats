@@ -19,6 +19,34 @@ def generate_output_folder() -> None:
     """
     if not os.path.isdir("generated"):
         os.mkdir("generated")
+        print("Created generated/ directory")
+
+
+def validate_templates() -> None:
+    """
+    Validate that required template files exist and contain expected placeholders
+    """
+    required_templates = {
+        "templates/overview.svg": ["{{ name }}", "{{ stars }}", "{{ forks }}", "{{ contributions }}", "{{ lines_changed }}", "{{ views }}", "{{ repos }}"],
+        "templates/languages.svg": ["{{ progress }}", "{{ lang_list }}"]
+    }
+    
+    for template_path, required_placeholders in required_templates.items():
+        if not os.path.isfile(template_path):
+            raise Exception(f"Template file {template_path} not found!")
+        
+        with open(template_path, "r") as f:
+            content = f.read()
+        
+        missing_placeholders = []
+        for placeholder in required_placeholders:
+            if placeholder not in content:
+                missing_placeholders.append(placeholder)
+        
+        if missing_placeholders:
+            raise Exception(f"Template {template_path} is missing placeholders: {missing_placeholders}")
+    
+    print("All template files validated successfully!")
 
 
 ################################################################################
@@ -33,6 +61,9 @@ async def generate_overview(s: Stats) -> None:
     try:
         print("Generating overview SVG...")
         
+        if not os.path.isfile("templates/overview.svg"):
+            raise Exception("Template file templates/overview.svg not found!")
+        
         with open("templates/overview.svg", "r") as f:
             output = f.read()
 
@@ -44,6 +75,8 @@ async def generate_overview(s: Stats) -> None:
         lines_changed = await s.lines_changed
         views = await s.views
         repos = await s.all_repos
+        
+        print(f"Stats collected - Name: {name}, Stars: {stars:,}, Forks: {forks:,}, Contributions: {contributions:,}")
         
         # Replace template variables
         output = re.sub("{{ name }}", name, output)
@@ -57,10 +90,20 @@ async def generate_overview(s: Stats) -> None:
         output = re.sub("{{ repos }}", f"{len(repos):,}", output)
 
         generate_output_folder()
-        with open("generated/overview.svg", "w") as f:
+        
+        output_path = "generated/overview.svg"
+        with open(output_path, "w") as f:
             f.write(output)
         
-        print("Overview SVG generated successfully!")
+        # Validate the generated file
+        if not os.path.isfile(output_path):
+            raise Exception("Failed to create overview.svg file")
+        
+        file_size = os.path.getsize(output_path)
+        if file_size < 100:  # SVG should be at least 100 bytes
+            raise Exception(f"Generated overview.svg seems too small ({file_size} bytes)")
+        
+        print(f"Overview SVG generated successfully! ({file_size} bytes)")
         
     except Exception as e:
         print(f"Error generating overview SVG: {e}")
@@ -75,6 +118,9 @@ async def generate_languages(s: Stats) -> None:
     try:
         print("Generating languages SVG...")
         
+        if not os.path.isfile("templates/languages.svg"):
+            raise Exception("Template file templates/languages.svg not found!")
+        
         with open("templates/languages.svg", "r") as f:
             output = f.read()
 
@@ -83,8 +129,15 @@ async def generate_languages(s: Stats) -> None:
         
         # Get languages with error handling
         languages = await s.languages
+        if not languages:
+            print("Warning: No languages found in repositories")
+            # Create a default entry for "Unknown"
+            languages = {"Unknown": {"size": 1, "color": "#cccccc", "prop": 100.0}}
+        
         sorted_languages = sorted(languages.items(), reverse=True,
                                   key=lambda t: t[1].get("size"))
+        
+        print(f"Found {len(sorted_languages)} languages")
         
         delay_between = 150
         for i, (lang, data) in enumerate(sorted_languages):
@@ -114,10 +167,20 @@ fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8z"></path></svg>
         output = re.sub(r"{{ lang_list }}", lang_list, output)
 
         generate_output_folder()
-        with open("generated/languages.svg", "w") as f:
+        
+        output_path = "generated/languages.svg"
+        with open(output_path, "w") as f:
             f.write(output)
         
-        print("Languages SVG generated successfully!")
+        # Validate the generated file
+        if not os.path.isfile(output_path):
+            raise Exception("Failed to create languages.svg file")
+        
+        file_size = os.path.getsize(output_path)
+        if file_size < 100:  # SVG should be at least 100 bytes
+            raise Exception(f"Generated languages.svg seems too small ({file_size} bytes)")
+        
+        print(f"Languages SVG generated successfully! ({file_size} bytes)")
         
     except Exception as e:
         print(f"Error generating languages SVG: {e}")
@@ -132,6 +195,15 @@ async def main() -> None:
     """
     Generate all badges
     """
+    print("Starting GitHub Stats generation...")
+    
+    # Validate templates first
+    try:
+        validate_templates()
+    except Exception as e:
+        print(f"Template validation failed: {e}")
+        raise
+    
     # Validate required environment variables
     access_token = os.getenv("ACCESS_TOKEN")
     if not access_token:
@@ -159,12 +231,13 @@ async def main() -> None:
     count_forks_env = os.getenv("COUNT_STATS_FROM_FORKS", "").strip()
     consider_forked_repos = count_forks_env.lower() in ("true", "1", "yes", "on") if count_forks_env else False
     
-    print(f"Generating stats for user: {user}")
-    print(f"Consider forked repositories: {consider_forked_repos}")
+    print(f"Configuration:")
+    print(f"  User: {user}")
+    print(f"  Consider forked repositories: {consider_forked_repos}")
     if exclude_repos:
-        print(f"Excluded repositories: {exclude_repos}")
+        print(f"  Excluded repositories: {exclude_repos}")
     if exclude_langs:
-        print(f"Excluded languages: {exclude_langs}")
+        print(f"  Excluded languages: {exclude_langs}")
     
     try:
         async with aiohttp.ClientSession() as session:
