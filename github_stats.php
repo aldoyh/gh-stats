@@ -28,6 +28,8 @@ final class Queries
                 // Organization-level token restrictions are partial errors: GitHub still
                 // returns whatever data it could collect, so we emit a warning and continue
                 // rather than aborting the whole run.
+                // NOTE: These substrings are taken directly from the GitHub API error message
+                // as of 2025. If GitHub changes the wording this guard may need updating.
                 if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
                     fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
                 } else {
