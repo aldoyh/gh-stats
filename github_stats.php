@@ -22,11 +22,21 @@ final class Queries
         );
 
         if (isset($result['errors']) && is_array($result['errors'])) {
-            $messages = array_map(
-                static fn(array $error): string => (string) ($error['message'] ?? 'Unknown error'),
-                $result['errors']
-            );
-            throw new RuntimeException('GraphQL errors: ' . implode('; ', $messages));
+            $fatalMessages = [];
+            foreach ($result['errors'] as $error) {
+                $message = (string) ($error['message'] ?? 'Unknown error');
+                // Organization-level token restrictions are partial errors: GitHub still
+                // returns whatever data it could collect, so we emit a warning and continue
+                // rather than aborting the whole run.
+                if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
+                    fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
+                } else {
+                    $fatalMessages[] = $message;
+                }
+            }
+            if ($fatalMessages !== []) {
+                throw new RuntimeException('GraphQL errors: ' . implode('; ', $fatalMessages));
+            }
         }
 
         return $result;
