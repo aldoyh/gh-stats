@@ -17,24 +17,12 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up PHP 8.3
+        uses: shivammathur/setup-php@v2
         with:
-          python-version: '3.12'
-          architecture: 'x64'
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install requirements
-        run: |
-          python3 -m pip install --upgrade pip setuptools wheel
-          python3 -m pip install -r requirements.txt
+          php-version: '8.3'
+          extensions: curl, json
+          coverage: none
 
       - name: Validate environment variables
         run: |
@@ -50,11 +38,11 @@ jobs:
       - name: Generate images
         run: |
           echo "Starting image generation..."
-          python3 --version
-          python3 generate_images.py
+          php --version
+          php generate_images.php
         env:
-          ACCESS_TOKEN: ${{ secrets.github_token }}
-          GITHUB_TOKEN: ${{ secrets.github_token }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
           EXCLUDED: ${{ secrets.EXCLUDED }}
           EXCLUDED_LANGS: ${{ secrets.EXCLUDED_LANGS }}
