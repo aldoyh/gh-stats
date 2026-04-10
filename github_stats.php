@@ -68,48 +68,74 @@ final class Queries
 
     private function request(string $url, string $method, array $payload = [], bool $isRest = false): array
     {
-        $ch = curl_init();
-        if ($ch === false) {
-            throw new RuntimeException('Failed to initialize curl');
-        }
+        $maxRetries = 5;
+        $attempt = 0;
+        $raw = '';
+        $statusCode = 0;
 
-        $headers = [
-            'Authorization: Bearer ' . $this->accessToken,
-            'User-Agent: gh-stats-php',
-            'Accept: application/vnd.github+json',
-        ];
-        if ($isRest) {
-            $headers[0] = 'Authorization: token ' . $this->accessToken;
-        }
+        while ($attempt < $maxRetries) {
+            $attempt++;
+            $requestUrl = $url;
 
-        if ($method === 'GET' && $payload !== []) {
-            $queryString = http_build_query($payload);
-            $url .= (str_contains($url, '?') ? '&' : '?') . $queryString;
-        }
+            $ch = curl_init();
+            if ($ch === false) {
+                throw new RuntimeException('Failed to initialize curl');
+            }
 
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 120,
-            CURLOPT_CUSTOMREQUEST => $method,
-        ]);
+            $headers = [
+                'Authorization: Bearer ' . $this->accessToken,
+                'User-Agent: gh-stats-php',
+                'Accept: application/vnd.github+json',
+            ];
+            if ($isRest) {
+                $headers[0] = 'Authorization: token ' . $this->accessToken;
+            }
 
-        if ($method === 'POST') {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_THROW_ON_ERROR));
-            $headers[] = 'Content-Type: application/json';
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        }
+            if ($method === 'GET' && $payload !== []) {
+                $queryString = http_build_query($payload);
+                $requestUrl .= (str_contains($requestUrl, '?') ? '&' : '?') . $queryString;
+            }
 
-        $raw = curl_exec($ch);
-        if ($raw === false) {
-            $error = curl_error($ch);
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $requestUrl,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_TIMEOUT => 120,
+                CURLOPT_CUSTOMREQUEST => $method,
+            ]);
+
+            if ($method === 'POST') {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_THROW_ON_ERROR));
+                $headers[] = 'Content-Type: application/json';
+                curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            }
+
+            $raw = curl_exec($ch);
+            $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($raw !== false && !in_array($statusCode, [429, 500, 502, 503, 504], true)) {
+                curl_close($ch);
+                break;
+            }
+
+            $curlError = curl_error($ch);
             curl_close($ch);
-            throw new RuntimeException('Curl request failed: ' . $error);
+
+            if ($attempt >= $maxRetries) {
+                if ($raw === false) {
+                    throw new RuntimeException('Curl request failed: ' . $curlError);
+                }
+                break;
+            }
+
+            $delay = 1 << ($attempt - 1);
+            $reason = $raw === false ? ('curl error: ' . $curlError) : ('HTTP ' . $statusCode);
+            fwrite(STDERR, "Transient API failure ({$reason}). Retrying in {$delay}s... (attempt {$attempt}/{$maxRetries})\n");
+            sleep($delay);
         }
 
-        $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        if ($raw === false) {
+            throw new RuntimeException('Curl request failed: unknown error');
+        }
 
         if ($statusCode === 202) {
             throw new RuntimeException('HTTP 202');
