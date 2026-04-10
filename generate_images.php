@@ -188,7 +188,7 @@ function envEnabled(string $key): bool
     if ($value === '') {
         return false;
     }
-    return !in_array($value, ['0', 'false', 'no', 'off'], true);
+    return in_array($value, ['1', 'true', 'yes', 'on'], true);
 }
 
 function main(): int
@@ -238,4 +238,3 @@ function main(): int
 }
 
 exit(main());
-

@@ -41,7 +41,7 @@ jobs:
           php --version
           php generate_images.php
         env:
-          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN || secrets.github_token || secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
           EXCLUDED: ${{ secrets.EXCLUDED }}
