@@ -68,12 +68,14 @@ final class Queries
 
     private function request(string $url, string $method, array $payload = [], bool $isRest = false): array
     {
-        $maxRetries = 5;
+        $retryableStatusCodes = [429, 500, 502, 503, 504];
+        $maxAttempts = 5;
         $attempt = 0;
         $raw = '';
         $statusCode = 0;
+        $lastCurlError = '';
 
-        while ($attempt < $maxRetries) {
+        while ($attempt < $maxAttempts) {
             $attempt++;
             $requestUrl = $url;
 
@@ -112,29 +114,30 @@ final class Queries
 
             $raw = curl_exec($ch);
             $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            if ($raw !== false && !in_array($statusCode, [429, 500, 502, 503, 504], true)) {
+            if ($raw !== false && !in_array($statusCode, $retryableStatusCodes, true)) {
                 curl_close($ch);
                 break;
             }
 
             $curlError = curl_error($ch);
+            $lastCurlError = $curlError;
             curl_close($ch);
 
-            if ($attempt >= $maxRetries) {
+            if ($attempt >= $maxAttempts) {
                 if ($raw === false) {
                     throw new RuntimeException('Curl request failed: ' . $curlError);
                 }
                 break;
             }
 
-            $delay = 1 << ($attempt - 1);
+            $delay = min(10, (int) pow(2, $attempt));
             $reason = $raw === false ? ('curl error: ' . $curlError) : ('HTTP ' . $statusCode);
-            fwrite(STDERR, "Transient API failure ({$reason}). Retrying in {$delay}s... (attempt {$attempt}/{$maxRetries})\n");
+            fwrite(STDERR, "Transient API failure ({$reason}). Retrying in {$delay}s... (request attempt {$attempt} of {$maxAttempts})\n");
             sleep($delay);
         }
 
         if ($raw === false) {
-            throw new RuntimeException('Curl request failed: unknown error');
+            throw new RuntimeException('Curl request failed: ' . ($lastCurlError !== '' ? $lastCurlError : 'unknown error'));
         }
 
         if ($statusCode === 202) {
