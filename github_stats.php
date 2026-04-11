@@ -22,11 +22,23 @@ final class Queries
         );
 
         if (isset($result['errors']) && is_array($result['errors'])) {
-            $messages = array_map(
-                static fn(array $error): string => (string) ($error['message'] ?? 'Unknown error'),
-                $result['errors']
-            );
-            throw new RuntimeException('GraphQL errors: ' . implode('; ', $messages));
+            $fatalMessages = [];
+            foreach ($result['errors'] as $error) {
+                $message = (string) ($error['message'] ?? 'Unknown error');
+                // Organization-level token restrictions are partial errors: GitHub still
+                // returns whatever data it could collect, so we emit a warning and continue
+                // rather than aborting the whole run.
+                // NOTE: These substrings are taken directly from the GitHub API error message
+                // as of 2025. If GitHub changes the wording this guard may need updating.
+                if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
+                    fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
+                } else {
+                    $fatalMessages[] = $message;
+                }
+            }
+            if ($fatalMessages !== []) {
+                throw new RuntimeException('GraphQL errors: ' . implode('; ', $fatalMessages));
+            }
         }
 
         return $result;
@@ -68,48 +80,77 @@ final class Queries
 
     private function request(string $url, string $method, array $payload = [], bool $isRest = false): array
     {
-        $ch = curl_init();
-        if ($ch === false) {
-            throw new RuntimeException('Failed to initialize curl');
-        }
+        $retryableStatusCodes = [429, 500, 502, 503, 504];
+        $maxAttempts = 5;
+        $attempt = 0;
+        $raw = '';
+        $statusCode = 0;
+        $lastCurlError = '';
 
-        $headers = [
-            'Authorization: Bearer ' . $this->accessToken,
-            'User-Agent: gh-stats-php',
-            'Accept: application/vnd.github+json',
-        ];
-        if ($isRest) {
-            $headers[0] = 'Authorization: token ' . $this->accessToken;
-        }
+        while ($attempt < $maxAttempts) {
+            $attempt++;
+            $requestUrl = $url;
 
-        if ($method === 'GET' && $payload !== []) {
-            $queryString = http_build_query($payload);
-            $url .= (str_contains($url, '?') ? '&' : '?') . $queryString;
-        }
+            $ch = curl_init();
+            if ($ch === false) {
+                throw new RuntimeException('Failed to initialize curl');
+            }
 
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 120,
-            CURLOPT_CUSTOMREQUEST => $method,
-        ]);
+            $headers = [
+                'Authorization: Bearer ' . $this->accessToken,
+                'User-Agent: gh-stats-php',
+                'Accept: application/vnd.github+json',
+            ];
+            if ($isRest) {
+                $headers[0] = 'Authorization: token ' . $this->accessToken;
+            }
 
-        if ($method === 'POST') {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_THROW_ON_ERROR));
-            $headers[] = 'Content-Type: application/json';
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        }
+            if ($method === 'GET' && $payload !== []) {
+                $queryString = http_build_query($payload);
+                $requestUrl .= (str_contains($requestUrl, '?') ? '&' : '?') . $queryString;
+            }
 
-        $raw = curl_exec($ch);
-        if ($raw === false) {
-            $error = curl_error($ch);
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $requestUrl,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_TIMEOUT => 120,
+                CURLOPT_CUSTOMREQUEST => $method,
+            ]);
+
+            if ($method === 'POST') {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_THROW_ON_ERROR));
+                $headers[] = 'Content-Type: application/json';
+                curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            }
+
+            $raw = curl_exec($ch);
+            $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($raw !== false && !in_array($statusCode, $retryableStatusCodes, true)) {
+                curl_close($ch);
+                break;
+            }
+
+            $curlError = curl_error($ch);
+            $lastCurlError = $curlError;
             curl_close($ch);
-            throw new RuntimeException('Curl request failed: ' . $error);
+
+            if ($attempt >= $maxAttempts) {
+                if ($raw === false) {
+                    throw new RuntimeException('Curl request failed: ' . $curlError);
+                }
+                break;
+            }
+
+            $delay = min(10, (int) pow(2, $attempt));
+            $reason = $raw === false ? ('curl error: ' . $curlError) : ('HTTP ' . $statusCode);
+            fwrite(STDERR, "Transient API failure ({$reason}). Retrying in {$delay}s... (request attempt {$attempt} of {$maxAttempts})\n");
+            sleep($delay);
         }
 
-        $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        if ($raw === false) {
+            throw new RuntimeException('Curl request failed: ' . ($lastCurlError !== '' ? $lastCurlError : 'unknown error'));
+        }
 
         if ($statusCode === 202) {
             throw new RuntimeException('HTTP 202');
