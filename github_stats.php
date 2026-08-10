@@ -28,6 +28,7 @@ final class Queries
 
             if (isset($result['errors']) && is_array($result['errors'])) {
                 $fatalMessages = [];
+                $allTransient = true;
                 foreach ($result['errors'] as $error) {
                     $message = (string) ($error['message'] ?? 'Unknown error');
                     // Organization-level token restrictions are partial errors: GitHub still
@@ -38,19 +39,23 @@ final class Queries
                     if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
                         fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
                     } else {
+                        // Check if this individual error is transient
+                        if (!str_contains($message, 'Something went wrong') && !str_contains($message, 'Please try again')) {
+                            $allTransient = false;
+                        }
                         $fatalMessages[] = $message;
                     }
                 }
                 if ($fatalMessages !== []) {
-                    $errorMsg = implode('; ', $fatalMessages);
-                    // Retry on transient GraphQL errors
-                    if ((str_contains($errorMsg, 'Something went wrong') || str_contains($errorMsg, 'Please try again')) && $attempt < $maxAttempts) {
+                    // Only retry if all fatal errors are transient and we haven't exhausted attempts
+                    if ($allTransient && $attempt < $maxAttempts) {
                         $delay = (int) min(30, pow(2, $attempt - 1));
-                        fwrite(STDERR, "Transient GraphQL error. Retrying in {$delay}s... (attempt {$attempt} of {$maxAttempts})\n");
+                        $errorMsg = implode('; ', $fatalMessages);
+                        fwrite(STDERR, "Transient GraphQL error(s). Retrying in {$delay}s... (attempt {$attempt} of {$maxAttempts}): {$errorMsg}\n");
                         sleep($delay);
                         continue;
                     }
-                    throw new RuntimeException('GraphQL errors: ' . $errorMsg);
+                    throw new RuntimeException('GraphQL errors: ' . implode('; ', $fatalMessages));
                 }
             }
 
