@@ -20,53 +20,41 @@ final class Queries
 
         while ($attempt < $maxAttempts) {
             $attempt++;
-            try {
-                $result = $this->request(
-                    'https://api.github.com/graphql',
-                    'POST',
-                    ['query' => $generatedQuery]
-                );
+            $result = $this->request(
+                'https://api.github.com/graphql',
+                'POST',
+                ['query' => $generatedQuery]
+            );
 
-                if (isset($result['errors']) && is_array($result['errors'])) {
-                    $fatalMessages = [];
-                    foreach ($result['errors'] as $error) {
-                        $message = (string) ($error['message'] ?? 'Unknown error');
-                        // Organization-level token restrictions are partial errors: GitHub still
-                        // returns whatever data it could collect, so we emit a warning and continue
-                        // rather than aborting the whole run.
-                        // NOTE: These substrings are taken directly from the GitHub API error message
-                        // as of 2025. If GitHub changes the wording this guard may need updating.
-                        if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
-                            fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
-                        } else {
-                            $fatalMessages[] = $message;
-                        }
-                    }
-                    if ($fatalMessages !== []) {
-                        // Check if this looks like a transient error
-                        $errorMsg = implode('; ', $fatalMessages);
-                        if (str_contains($errorMsg, 'Something went wrong') || str_contains($errorMsg, 'Please try again')) {
-                            if ($attempt < $maxAttempts) {
-                                $delay = min(30, (int) pow(2, $attempt - 1));
-                                fwrite(STDERR, "Transient GraphQL error. Retrying in {$delay}s... (attempt {$attempt} of {$maxAttempts})\n");
-                                sleep($delay);
-                                continue;
-                            }
-                        }
-                        throw new RuntimeException('GraphQL errors: ' . $errorMsg);
+            if (isset($result['errors']) && is_array($result['errors'])) {
+                $fatalMessages = [];
+                foreach ($result['errors'] as $error) {
+                    $message = (string) ($error['message'] ?? 'Unknown error');
+                    // Organization-level token restrictions are partial errors: GitHub still
+                    // returns whatever data it could collect, so we emit a warning and continue
+                    // rather than aborting the whole run.
+                    // NOTE: These substrings are taken directly from the GitHub API error message
+                    // as of 2025. If GitHub changes the wording this guard may need updating.
+                    if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
+                        fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
+                    } else {
+                        $fatalMessages[] = $message;
                     }
                 }
-
-                return $result;
-            } catch (RuntimeException $e) {
-                $message = $e->getMessage();
-                if (str_contains($message, 'Transient GraphQL error') || str_contains($message, 'GraphQL errors: Something went wrong')) {
-                    if ($attempt < $maxAttempts) {
+                if ($fatalMessages !== []) {
+                    $errorMsg = implode('; ', $fatalMessages);
+                    // Retry on transient GraphQL errors
+                    if ((str_contains($errorMsg, 'Something went wrong') || str_contains($errorMsg, 'Please try again')) && $attempt < $maxAttempts) {
+                        $delay = (int) min(30, pow(2, $attempt - 1));
+                        fwrite(STDERR, "Transient GraphQL error. Retrying in {$delay}s... (attempt {$attempt} of {$maxAttempts})\n");
+                        sleep($delay);
                         continue;
                     }
+                    throw new RuntimeException('GraphQL errors: ' . $errorMsg);
                 }
-                throw $e;
             }
+
+            return $result;
         }
 
         throw new RuntimeException('GraphQL query failed after ' . $maxAttempts . ' attempts');
