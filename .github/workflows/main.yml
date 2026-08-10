@@ -27,9 +27,9 @@ jobs:
       - name: Validate environment variables
         run: |
           echo "Validating required environment variables..."
-          if [ -z "${{ secrets.ACCESS_TOKEN }}" ]; then
-            echo "ERROR: ACCESS_TOKEN secret is not set!"
-            echo "Please set ACCESS_TOKEN in your repository secrets with a GitHub personal access token."
+          if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
+            echo "ERROR: GITHUB_TOKEN secret is not set!"
+            echo "Please set GITHUB_TOKEN in your repository secrets with a GitHub personal access token."
             exit 1
           fi
           echo "ACCESS_TOKEN is set ✓"
