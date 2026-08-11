@@ -10,29 +10,31 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ACCESS_TOKEN || github.token }}
 
-      - name: Set up PHP 
+      - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.5'
+          php-version: '8.3'
           extensions: curl, json
           coverage: none
 
       - name: Validate environment variables
         run: |
           echo "Validating required environment variables..."
-          if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
-            echo "ERROR: GITHUB_TOKEN secret is not set!"
-            echo "Please set GITHUB_TOKEN in your repository secrets with a GitHub personal access token."
-            exit 1
+          if [ -z "${{ secrets.ACCESS_TOKEN }}" ]; then
+            echo "WARNING: ACCESS_TOKEN secret is not set. Falling back to GITHUB_TOKEN."
+            echo "For full stats (including private repos & traffic views) set ACCESS_TOKEN with a classic PAT (repo + read:user)."
+          else
+            echo "ACCESS_TOKEN is set ✓"
           fi
-          echo "ACCESS_TOKEN is set ✓"
           echo "GITHUB_ACTOR: ${{ github.actor }}"
 
       - name: Generate images
@@ -41,8 +43,8 @@ jobs:
           php --version
           php generate_images.php
         env:
-          ACCESS_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN || github.token }}
           GITHUB_ACTOR: ${{ github.actor }}
           EXCLUDED: ${{ secrets.EXCLUDED }}
           EXCLUDED_LANGS: ${{ secrets.EXCLUDED_LANGS }}
@@ -69,24 +71,17 @@ jobs:
           git config --local user.name "github-stats[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # Add generated files
           git add generated/
           
-          # Check if there are changes to commit
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
             echo "Committing changes..."
-            git commit -m "Update generated stats images [skip ci]" || {
-              echo "Commit failed, but continuing..."
-            }
+            git commit -m "Update generated stats images [skip ci]" || true
             
             echo "Pushing changes..."
-            git push origin ${{ github.ref_name }} || {
-              echo "Push failed. This might be due to concurrent updates."
-              exit 1
-            }
+            git push origin ${{ github.ref_name }}
             echo "Changes pushed successfully!"
           fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN || github.token }}
