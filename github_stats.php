@@ -15,33 +15,54 @@ final class Queries
 
     public function query(string $generatedQuery): array
     {
-        $result = $this->request(
-            'https://api.github.com/graphql',
-            'POST',
-            ['query' => $generatedQuery]
-        );
+        $maxAttempts = 10;
+        $attempt = 0;
 
-        if (isset($result['errors']) && is_array($result['errors'])) {
-            $fatalMessages = [];
-            foreach ($result['errors'] as $error) {
-                $message = (string) ($error['message'] ?? 'Unknown error');
-                // Organization-level token restrictions are partial errors: GitHub still
-                // returns whatever data it could collect, so we emit a warning and continue
-                // rather than aborting the whole run.
-                // NOTE: These substrings are taken directly from the GitHub API error message
-                // as of 2025. If GitHub changes the wording this guard may need updating.
-                if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
-                    fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
-                } else {
-                    $fatalMessages[] = $message;
+        while ($attempt < $maxAttempts) {
+            $attempt++;
+            $result = $this->request(
+                'https://api.github.com/graphql',
+                'POST',
+                ['query' => $generatedQuery]
+            );
+
+            if (isset($result['errors']) && is_array($result['errors'])) {
+                $fatalMessages = [];
+                $allTransient = true;
+                foreach ($result['errors'] as $error) {
+                    $message = (string) ($error['message'] ?? 'Unknown error');
+                    // Organization-level token restrictions are partial errors: GitHub still
+                    // returns whatever data it could collect, so we emit a warning and continue
+                    // rather than aborting the whole run.
+                    // NOTE: These substrings are taken directly from the GitHub API error message
+                    // as of 2025. If GitHub changes the wording this guard may need updating.
+                    if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
+                        fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
+                    } else {
+                        // Check if this individual error is transient
+                        if (!str_contains($message, 'Something went wrong') && !str_contains($message, 'Please try again')) {
+                            $allTransient = false;
+                        }
+                        $fatalMessages[] = $message;
+                    }
+                }
+                if ($fatalMessages !== []) {
+                    // Only retry if all fatal errors are transient and we haven't exhausted attempts
+                    if ($allTransient && $attempt < $maxAttempts) {
+                        $delay = (int) min(30, pow(2, $attempt - 1));
+                        $errorMsg = implode('; ', $fatalMessages);
+                        fwrite(STDERR, "Transient GraphQL error(s). Retrying in {$delay}s... (attempt {$attempt} of {$maxAttempts}): {$errorMsg}\n");
+                        sleep($delay);
+                        continue;
+                    }
+                    throw new RuntimeException('GraphQL errors: ' . implode('; ', $fatalMessages));
                 }
             }
-            if ($fatalMessages !== []) {
-                throw new RuntimeException('GraphQL errors: ' . implode('; ', $fatalMessages));
-            }
+
+            return $result;
         }
 
-        return $result;
+        throw new RuntimeException('GraphQL query failed after ' . $maxAttempts . ' attempts');
     }
 
     public function queryRest(string $path, array $params = []): array
