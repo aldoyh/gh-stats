@@ -16,8 +16,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.ACCESS_TOKEN || github.token }}
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
@@ -83,5 +81,3 @@ jobs:
             git push origin ${{ github.ref_name }}
             echo "Changes pushed successfully!"
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN || github.token }}
