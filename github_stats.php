@@ -290,8 +290,9 @@ final class Queries
 
     /**
      * All queries target a specific user by login instead of `viewer` so they
-     * work both with personal access tokens (full stats) and with the GitHub
-     * Actions installation token (public stats only).
+     * work with any personal access token (classic or fine-grained). They are
+     * never used with installation tokens (GITHUB_TOKEN), which cannot run
+     * user-scoped GraphQL queries; Stats falls back to REST collection there.
      */
     private static function assertValidLogin(string $login): string
     {
@@ -403,11 +404,60 @@ GRAPHQL;
 
 final class Stats
 {
+    private const LANGUAGE_COLORS = [
+        'Assembly' => '#6E4C13',
+        'Batchfile' => '#C1F12E',
+        'C' => '#555555',
+        'C#' => '#178600',
+        'C++' => '#f34b7d',
+        'CSS' => '#563d7c',
+        'Clojure' => '#db5855',
+        'CoffeeScript' => '#244776',
+        'Dart' => '#00B4AB',
+        'Dockerfile' => '#384d54',
+        'Elixir' => '#6e4a7e',
+        'Go' => '#00ADD8',
+        'Groovy' => '#4298f4',
+        'HTML' => '#e34c26',
+        'Haskell' => '#5e5086',
+        'Java' => '#b07219',
+        'JavaScript' => '#f1e05a',
+        'JSON' => '#292929',
+        'Julia' => '#a270ba',
+        'Jupyter Notebook' => '#DA5B0B',
+        'Kotlin' => '#A97BFF',
+        'Lua' => '#000080',
+        'MATLAB' => '#e16737',
+        'Makefile' => '#427819',
+        'Objective-C' => '#438eff',
+        'Perl' => '#0298c3',
+        'PHP' => '#4F5D95',
+        'PowerShell' => '#012456',
+        'Python' => '#3572A5',
+        'R' => '#198CE7',
+        'Ruby' => '#701516',
+        'Rust' => '#dea584',
+        'SCSS' => '#c6538c',
+        'SQL' => '#e38c00',
+        'Scala' => '#c22d40',
+        'Shell' => '#89e051',
+        'Solidity' => '#AA674A',
+        'Svelte' => '#ff3e00',
+        'Swift' => '#F05138',
+        'TeX' => '#3D6117',
+        'TypeScript' => '#3178c6',
+        'Vim Script' => '#199f4b',
+        'Vue' => '#41b883',
+        'YAML' => '#cb171e',
+        'Zig' => '#ec915c',
+    ];
+
     private string $username;
     private array $excludeRepos;
     private array $excludeLangs;
     private bool $considerForkedRepos;
     private Queries $queries;
+    private string $tokenKind = 'user';
 
     private ?string $name = null;
     private ?int $stargazers = null;
@@ -431,6 +481,14 @@ final class Stats
         $this->excludeLangs = array_fill_keys($excludeLangs, true);
         $this->considerForkedRepos = $considerForkedRepos;
         $this->queries = new Queries($username, $accessToken);
+
+        $probe = Queries::probeToken($accessToken);
+        $this->tokenKind = is_array($probe) ? (string) ($probe['token_kind'] ?? 'user') : 'user';
+    }
+
+    public function isInstallationToken(): bool
+    {
+        return $this->tokenKind === 'installation';
     }
 
     public function getName(): string
@@ -488,6 +546,14 @@ final class Stats
         }
 
         $this->totalContributions = 0;
+
+        // Contribution calendars are only available through GraphQL, and
+        // installation tokens cannot run user-scoped GraphQL queries.
+        // Degraded (public-only) mode therefore reports zero contributions.
+        if ($this->isInstallationToken()) {
+            return $this->totalContributions;
+        }
+
         $years = $this->queries->query(Queries::contribYears($this->username))['data']['user']['contributionsCollection']['contributionYears'] ?? [];
         if (!is_array($years) || $years === []) {
             return 0;
@@ -511,6 +577,14 @@ final class Stats
     public function getLinesChanged(): array
     {
         if ($this->linesChanged !== null) {
+            return $this->linesChanged;
+        }
+
+        // Contributor stats require push access to each repository, which an
+        // installation token only has for the repository it belongs to.
+        if ($this->isInstallationToken()) {
+            $this->linesChanged = [0, 0];
+
             return $this->linesChanged;
         }
 
@@ -553,6 +627,14 @@ final class Stats
             return $this->views;
         }
 
+        // Traffic endpoints require push access to each repository, which an
+        // installation token only has for the repository it belongs to.
+        if ($this->isInstallationToken()) {
+            $this->views = 0;
+
+            return $this->views;
+        }
+
         $total = 0;
         foreach ($this->getRepos() as $repo) {
             $views = $this->queries->queryRest("/repos/{$repo}/traffic/views");
@@ -583,6 +665,12 @@ final class Stats
         $this->languages = [];
         $this->repos = [];
         $this->ignoredRepos = [];
+
+        if ($this->isInstallationToken()) {
+            $this->getStatsRest();
+
+            return;
+        }
 
         $nextOwned = null;
         $nextContrib = null;
@@ -673,6 +761,89 @@ final class Stats
             $nextContrib = $contribPageInfo['endCursor'] ?? $nextContrib;
         }
 
+        $this->finalizeLanguages();
+    }
+
+    /**
+     * Degraded stats collection for installation tokens (e.g. the Actions
+     * GITHUB_TOKEN). Installation tokens cannot run user-scoped GraphQL
+     * queries, so public repository data is collected via the REST API
+     * instead: owned public repositories, their stars, forks and languages.
+     */
+    private function getStatsRest(): void
+    {
+        $profile = $this->queries->queryRest('/users/' . rawurlencode($this->username));
+        $this->name = (string) ($profile['name'] ?? ($profile['login'] ?? $this->username));
+
+        $page = 1;
+        while ($page <= 20) {
+            $batch = $this->queries->queryRest('/users/' . rawurlencode($this->username) . '/repos', [
+                'per_page' => 100,
+                'page' => $page,
+                'sort' => 'updated',
+            ]);
+            if (!is_array($batch) || $batch === []) {
+                break;
+            }
+
+            foreach ($batch as $repo) {
+                if (!is_array($repo)) {
+                    continue;
+                }
+
+                $nameWithOwner = (string) ($repo['full_name'] ?? '');
+                if ($nameWithOwner === '' || isset($this->repos[$nameWithOwner]) || isset($this->excludeRepos[$nameWithOwner])) {
+                    continue;
+                }
+
+                if ((bool) ($repo['fork'] ?? false) && !$this->considerForkedRepos) {
+                    $this->ignoredRepos[$nameWithOwner] = true;
+
+                    continue;
+                }
+
+                $this->repos[$nameWithOwner] = true;
+                $this->stargazers += (int) ($repo['stargazers_count'] ?? 0);
+                $this->forks += (int) ($repo['forks_count'] ?? 0);
+            }
+
+            if (count($batch) < 100) {
+                break;
+            }
+            $page++;
+        }
+
+        foreach (array_keys($this->repos) as $repo) {
+            $langs = $this->queries->queryRest("/repos/{$repo}/languages");
+            if (!is_array($langs) || $langs === []) {
+                continue;
+            }
+
+            foreach ($langs as $langName => $bytes) {
+                $langName = (string) $langName;
+                if (isset($this->excludeLangs[$langName])) {
+                    continue;
+                }
+
+                if (!isset($this->languages[$langName])) {
+                    $this->languages[$langName] = [
+                        'size' => 0,
+                        'occurrences' => 0,
+                        'color' => self::LANGUAGE_COLORS[$langName] ?? null,
+                        'prop' => 0.0,
+                    ];
+                }
+
+                $this->languages[$langName]['size'] += (int) $bytes;
+                $this->languages[$langName]['occurrences'] += 1;
+            }
+        }
+
+        $this->finalizeLanguages();
+    }
+
+    private function finalizeLanguages(): void
+    {
         $totalLanguageSize = 0;
         foreach ($this->languages as $language) {
             $totalLanguageSize += (int) ($language['size'] ?? 0);
