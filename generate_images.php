@@ -95,7 +95,12 @@ function resolveToken(): array
         $probe = Queries::probeToken($token);
         if ($probe !== null) {
             $login = (string) ($probe['login'] ?? 'unknown');
-            echo "Using {$name} (authenticated as {$login}).\n";
+            $kind = (string) ($probe['token_kind'] ?? 'user');
+            if ($kind === 'installation') {
+                echo "Using {$name} (repository installation token, public stats only).\n";
+            } else {
+                echo "Using {$name} (authenticated as {$login}).\n";
+            }
             if ($name === 'GITHUB_TOKEN') {
                 annotateWarning(
                     'Falling back to GITHUB_TOKEN: stats are limited to public data. '

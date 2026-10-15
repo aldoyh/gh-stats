@@ -16,8 +16,15 @@ final class Queries
     /**
      * Validate a token against the GitHub REST API.
      *
-     * Returns the authenticated user payload on success, or null when the
-     * token is missing, invalid, expired, or revoked.
+     * Supports two kinds of tokens:
+     *   - Personal access tokens, validated via GET /user (returns the user payload
+     *     plus a token_kind of 'user').
+     *   - Installation tokens (e.g. the Actions GITHUB_TOKEN), which cannot call
+     *     GET /user (HTTP 403 "Resource not accessible by integration") and are
+     *     validated against GET /repos/{GITHUB_REPOSITORY} instead, returning the
+     *     repository owner login and a token_kind of 'installation'.
+     *
+     * Returns null when the token is missing, invalid, expired, or revoked.
      */
     public static function probeToken(string $token): ?array
     {
@@ -26,19 +33,53 @@ final class Queries
             return null;
         }
 
+        $headers = [
+            'Authorization: Bearer ' . $token,
+            'User-Agent: gh-stats-php',
+            'Accept: application/vnd.github+json',
+        ];
+
+        $user = self::probeRequest('https://api.github.com/user', $headers);
+        if ($user !== null) {
+            $user['token_kind'] = 'user';
+
+            return $user;
+        }
+
+        $repo = trim((string) getenv('GITHUB_REPOSITORY'));
+        if ($repo !== '' && str_contains($repo, '/')) {
+            $encoded = implode('/', array_map('rawurlencode', explode('/', $repo)));
+            $repoData = self::probeRequest('https://api.github.com/repos/' . $encoded, $headers);
+            if ($repoData !== null) {
+                $owner = (string) ($repoData['owner']['login'] ?? '');
+
+                return [
+                    'login' => ($owner !== '' ? $owner : 'github-actions[bot]'),
+                    'token_kind' => 'installation',
+                ];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Perform a GET request and return the decoded JSON body on HTTP 200, null otherwise.
+     *
+     * @param array<int, string> $headers
+     * @return array<string, mixed>|null
+     */
+    private static function probeRequest(string $url, array $headers): ?array
+    {
         $ch = curl_init();
         if ($ch === false) {
             return null;
         }
 
         curl_setopt_array($ch, [
-            CURLOPT_URL => 'https://api.github.com/user',
+            CURLOPT_URL => $url,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                'Authorization: Bearer ' . $token,
-                'User-Agent: gh-stats-php',
-                'Accept: application/vnd.github+json',
-            ],
+            CURLOPT_HTTPHEADER => $headers,
             CURLOPT_TIMEOUT => 30,
         ]);
 
