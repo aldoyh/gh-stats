@@ -12,6 +12,27 @@ function generateOutputFolder(): void
     }
 }
 
+/**
+ * Print a GitHub Actions error annotation so the failure reason is visible
+ * directly on the workflow run summary without digging through the logs.
+ */
+function annotateError(string $message): void
+{
+    $clean = str_replace(["\r", "\n"], ' ', $message);
+    $clean = str_replace('%', '%25', $clean);
+    echo "::error::{$clean}\n";
+}
+
+/**
+ * Print a GitHub Actions warning annotation.
+ */
+function annotateWarning(string $message): void
+{
+    $clean = str_replace(["\r", "\n"], ' ', $message);
+    $clean = str_replace('%', '%25', $clean);
+    echo "::warning::{$clean}\n";
+}
+
 function validateTemplates(): void
 {
     $requiredTemplates = [
@@ -33,6 +54,72 @@ function validateTemplates(): void
     }
 
     echo "All template files validated successfully!\n";
+}
+
+/**
+ * Pick a working GitHub token.
+ *
+ * Order of preference:
+ *   1. ACCESS_TOKEN (personal access token, full stats including private
+ *      repositories and traffic views)
+ *   2. GITHUB_TOKEN (the repository's built-in Actions token, public stats
+ *      only - used as a graceful fallback so the workflow still produces
+ *      images when the PAT is missing, invalid, or expired)
+ *
+ * @return array{0: string, 1: string} The token to use and which candidate it came from.
+ */
+function resolveToken(): array
+{
+    $accessToken = trim((string) getenv('ACCESS_TOKEN'));
+    $githubToken = trim((string) getenv('GITHUB_TOKEN'));
+
+    $candidates = [];
+    // When the ACCESS_TOKEN secret is not set, the workflow maps ACCESS_TOKEN
+    // to github.token. In that case both values are identical and we should
+    // treat it purely as the Actions token.
+    if ($accessToken !== '' && $accessToken !== $githubToken) {
+        $candidates['ACCESS_TOKEN'] = $accessToken;
+    }
+    if ($githubToken !== '') {
+        $candidates['GITHUB_TOKEN'] = $githubToken;
+    }
+
+    if ($candidates === []) {
+        throw new RuntimeException(
+            'No GitHub token found. Set the ACCESS_TOKEN secret to a personal access token '
+            . 'with the repo and read:user scopes (see the README installation steps).'
+        );
+    }
+
+    foreach ($candidates as $name => $token) {
+        $probe = Queries::probeToken($token);
+        if ($probe !== null) {
+            $login = (string) ($probe['login'] ?? 'unknown');
+            echo "Using {$name} (authenticated as {$login}).\n";
+            if ($name === 'GITHUB_TOKEN') {
+                annotateWarning(
+                    'Falling back to GITHUB_TOKEN: stats are limited to public data. '
+                    . 'For full stats (private repos + traffic views) set a valid ACCESS_TOKEN secret '
+                    . 'with a personal access token (scopes: repo, read:user).'
+                );
+            }
+            return [$token, $name];
+        }
+
+        if ($name === 'ACCESS_TOKEN') {
+            annotateWarning(
+                'ACCESS_TOKEN is set but invalid or expired. Regenerate a personal access token '
+                . '(scopes: repo, read:user) and update the ACCESS_TOKEN secret. '
+                . 'Falling back to GITHUB_TOKEN (public stats only) for this run.'
+            );
+            fwrite(STDERR, "Warning: ACCESS_TOKEN is invalid or expired. Trying GITHUB_TOKEN as fallback.\n");
+        }
+    }
+
+    throw new RuntimeException(
+        'No usable GitHub token found. ACCESS_TOKEN is invalid or expired: regenerate a personal '
+        . 'access token (scopes: repo, read:user) and update the ACCESS_TOKEN secret.'
+    );
 }
 
 function generateOverview(Stats $stats): void
@@ -197,14 +284,7 @@ function main(): int
         echo "Starting GitHub Stats generation...\n";
         validateTemplates();
 
-        $accessToken = trim((string) getenv('ACCESS_TOKEN'));
-        if ($accessToken === '') {
-            $accessToken = trim((string) getenv('GITHUB_TOKEN'));
-            if ($accessToken === '') {
-                throw new RuntimeException('ACCESS_TOKEN environment variable is required! Please set it in your repository secrets.');
-            }
-            echo "Warning: Using GITHUB_TOKEN as fallback. For better functionality, use a personal access token as ACCESS_TOKEN.\n";
-        }
+        [$accessToken, $tokenSource] = resolveToken();
 
         $user = trim((string) getenv('GITHUB_ACTOR'));
         if ($user === '') {
@@ -217,6 +297,7 @@ function main(): int
 
         echo "Configuration:\n";
         echo "  User: {$user}\n";
+        echo "  Token source: {$tokenSource}\n";
         echo '  Consider forked repositories: ' . ($considerForkedRepos ? 'True' : 'False') . "\n";
         if ($excludeRepos !== []) {
             echo '  Excluded repositories: ' . implode(', ', $excludeRepos) . "\n";
@@ -232,7 +313,9 @@ function main(): int
         echo "Successfully generated all stats images!\n";
         return 0;
     } catch (Throwable $e) {
-        fwrite(STDERR, 'Error generating stats: ' . $e->getMessage() . "\n");
+        $message = 'Error generating stats: ' . $e->getMessage();
+        annotateError($message);
+        fwrite(STDERR, $message . "\n");
         return 1;
     }
 }
