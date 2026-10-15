@@ -13,6 +13,48 @@ final class Queries
         $this->accessToken = $accessToken;
     }
 
+    /**
+     * Validate a token against the GitHub REST API.
+     *
+     * Returns the authenticated user payload on success, or null when the
+     * token is missing, invalid, expired, or revoked.
+     */
+    public static function probeToken(string $token): ?array
+    {
+        $token = trim($token);
+        if ($token === '') {
+            return null;
+        }
+
+        $ch = curl_init();
+        if ($ch === false) {
+            return null;
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_URL => 'https://api.github.com/user',
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . $token,
+                'User-Agent: gh-stats-php',
+                'Accept: application/vnd.github+json',
+            ],
+            CURLOPT_TIMEOUT => 30,
+        ]);
+
+        $raw = curl_exec($ch);
+        $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($raw === false || $statusCode !== 200) {
+            return null;
+        }
+
+        $decoded = json_decode((string) $raw, true);
+
+        return is_array($decoded) ? $decoded : null;
+    }
+
     public function query(string $generatedQuery): array
     {
         $maxAttempts = 10;
@@ -37,7 +79,7 @@ final class Queries
                     // NOTE: These substrings are taken directly from the GitHub API error message
                     // as of 2025. If GitHub changes the wording this guard may need updating.
                     if (str_contains($message, 'forbids access via') || str_contains($message, 'fine-grained personal access token')) {
-                        fwrite(STDERR, "Warning: skipping restricted data – {$message}\n");
+                        fwrite(STDERR, "Warning: skipping restricted data - {$message}\n");
                     } else {
                         // Check if this individual error is transient
                         if (!str_contains($message, 'Something went wrong') && !str_contains($message, 'Please try again')) {
@@ -88,7 +130,11 @@ final class Queries
                     continue;
                 }
                 if (str_contains($message, 'HTTP 404')) {
-                    fwrite(STDERR, "Path {$path} not found, returning empty result\n");
+                    fwrite(STDERR, "Path {$path} not found or not visible to this token, returning empty result\n");
+                    return [];
+                }
+                if (str_contains($message, 'HTTP 403')) {
+                    fwrite(STDERR, "Access to {$path} is forbidden for this token, returning empty result\n");
                     return [];
                 }
                 throw $e;
@@ -140,8 +186,8 @@ final class Queries
             ]);
 
             if ($method === 'POST') {
-                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_THROW_ON_ERROR));
                 $headers[] = 'Content-Type: application/json';
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload, JSON_THROW_ON_ERROR));
                 curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
             }
 
@@ -177,10 +223,13 @@ final class Queries
             throw new RuntimeException('HTTP 202');
         }
         if ($statusCode === 401) {
-            throw new RuntimeException('Authentication failed. Please check your ACCESS_TOKEN.');
+            throw new RuntimeException('HTTP 401 Bad credentials: the supplied token is invalid or expired. If this is the ACCESS_TOKEN secret, regenerate a personal access token (scopes: repo, read:user) and update the secret.');
         }
         if ($statusCode === 403) {
-            throw new RuntimeException('API rate limit exceeded or insufficient permissions.');
+            throw new RuntimeException("HTTP 403 Forbidden: {$raw}");
+        }
+        if ($statusCode === 404) {
+            throw new RuntimeException("HTTP 404 Not Found: {$raw}");
         }
         if ($statusCode >= 400) {
             throw new RuntimeException("GitHub API error {$statusCode}: {$raw}");
@@ -198,14 +247,29 @@ final class Queries
         return $decoded;
     }
 
-    public static function reposOverview(?string $contribCursor = null, ?string $ownedCursor = null): string
+    /**
+     * All queries target a specific user by login instead of `viewer` so they
+     * work both with personal access tokens (full stats) and with the GitHub
+     * Actions installation token (public stats only).
+     */
+    private static function assertValidLogin(string $login): string
     {
+        if (!preg_match('/^[A-Za-z0-9-]{1,39}$/', $login)) {
+            throw new InvalidArgumentException('Invalid GitHub login: ' . $login);
+        }
+
+        return $login;
+    }
+
+    public static function reposOverview(string $login, ?string $contribCursor = null, ?string $ownedCursor = null): string
+    {
+        $login = self::assertValidLogin($login);
         $ownedCursorValue = $ownedCursor === null ? 'null' : '"' . addslashes($ownedCursor) . '"';
         $contribCursorValue = $contribCursor === null ? 'null' : '"' . addslashes($contribCursor) . '"';
 
         return <<<GRAPHQL
 {
-  viewer {
+  user(login: "{$login}") {
     login
     name
     repositories(
@@ -252,11 +316,13 @@ final class Queries
 GRAPHQL;
     }
 
-    public static function contribYears(): string
+    public static function contribYears(string $login): string
     {
-        return <<<'GRAPHQL'
+        $login = self::assertValidLogin($login);
+
+        return <<<GRAPHQL
 query {
-  viewer {
+  user(login: "{$login}") {
     contributionsCollection {
       contributionYears
     }
@@ -265,8 +331,9 @@ query {
 GRAPHQL;
     }
 
-    public static function allContribs(array $years): string
+    public static function allContribs(string $login, array $years): string
     {
+        $login = self::assertValidLogin($login);
         $parts = [];
         foreach ($years as $year) {
             $yearValue = (string) $year;
@@ -282,9 +349,10 @@ GRAPHQL;
         }
 
         $joined = implode("\n", $parts);
+
         return <<<GRAPHQL
 query {
-  viewer {
+  user(login: "{$login}") {
 {$joined}
   }
 }
@@ -379,12 +447,12 @@ final class Stats
         }
 
         $this->totalContributions = 0;
-        $years = $this->queries->query(Queries::contribYears())['data']['viewer']['contributionsCollection']['contributionYears'] ?? [];
+        $years = $this->queries->query(Queries::contribYears($this->username))['data']['user']['contributionsCollection']['contributionYears'] ?? [];
         if (!is_array($years) || $years === []) {
             return 0;
         }
 
-        $byYear = $this->queries->query(Queries::allContribs($years))['data']['viewer'] ?? [];
+        $byYear = $this->queries->query(Queries::allContribs($this->username, $years))['data']['user'] ?? [];
         if (!is_array($byYear)) {
             return 0;
         }
@@ -479,23 +547,22 @@ final class Stats
         $nextContrib = null;
 
         while (true) {
-            $rawResults = $this->queries->query(Queries::reposOverview($nextContrib, $nextOwned));
-            $viewer = $rawResults['data']['viewer'] ?? [];
-            if (!is_array($viewer)) {
-                $viewer = [];
+            $rawResults = $this->queries->query(Queries::reposOverview($this->username, $nextContrib, $nextOwned));
+            $user = $rawResults['data']['user'] ?? [];
+            if (!is_array($user)) {
+                $user = [];
             }
 
-            $this->name = (string) ($viewer['name'] ?? $viewer['login'] ?? 'No Name');
+            $this->name = (string) ($user['name'] ?? $user['login'] ?? 'No Name');
 
-            $contribRepos = $viewer['repositoriesContributedTo'] ?? [];
-            $ownedRepos = $viewer['repositories'] ?? [];
+            $contribRepos = $user['repositoriesContributedTo'] ?? [];
+            $ownedRepos = $user['repositories'] ?? [];
             $repos = is_array($ownedRepos['nodes'] ?? null) ? $ownedRepos['nodes'] : [];
 
+            $contribNodes = is_array($contribRepos['nodes'] ?? null) ? $contribRepos['nodes'] : [];
             if ($this->considerForkedRepos) {
-                $contribNodes = is_array($contribRepos['nodes'] ?? null) ? $contribRepos['nodes'] : [];
                 $repos = array_merge($repos, $contribNodes);
             } else {
-                $contribNodes = is_array($contribRepos['nodes'] ?? null) ? $contribRepos['nodes'] : [];
                 foreach ($contribNodes as $repo) {
                     if (!is_array($repo)) {
                         continue;
